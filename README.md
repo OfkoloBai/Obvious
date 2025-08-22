@@ -38,7 +38,7 @@ pip install websocket-client winsound pystray pillow win10toast
 
 3. 根据您的环境修改代码中的配置项（特别是OBS路径和警报音文件路径）
 
-打开 `quake_monitor.py` 文件，找到以下配置项并进行修改：
+打开 `obvious_rec.py` 文件，找到以下配置项并进行修改：
 
 ```python
 # 默认配置 - 用户需要根据自己的环境修改这些配置
