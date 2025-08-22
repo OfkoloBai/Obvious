@@ -30,13 +30,13 @@
 git clone <仓库地址>
 ```
 
-1. 安装必要的Python依赖：
+2. 安装必要的Python依赖：
 
 ```bash
 pip install websocket-client winsound pystray pillow win10toast
 ```
 
-1. 根据您的环境修改代码中的配置项（特别是OBS路径和警报音文件路径）
+3. 根据您的环境修改代码中的配置项（特别是OBS路径和警报音文件路径）
 
 打开 `quake_monitor.py` 文件，找到以下配置项并进行修改：
 
@@ -59,7 +59,7 @@ DEFAULT_CONFIG = AppConfig(
 )
 ```
 
-1. 运行程序：
+4. 运行程序：
 
 ```bash
 python obvious_rec.py
