@@ -2,6 +2,7 @@
 地震速报监听程序 - 建议在PC上使用
 监听日本气象厅(JMA)和中国地震预警网(CEA)的地震预警信息
 当检测到达到设定阈值的地震时，自动触发警报和OBS录制
+注意：此代码目前只在Windows10上勉强调试运行过，不一定适合所有人
 """
 import os
 import json
@@ -110,21 +111,21 @@ class AppConfig:
         return asdict(self)
 
 
-# 默认配置
+# 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    obs_path=r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
-    obs_dir=r"C:\Program Files\obs-studio\bin\64bit",
-    record_path=os.path.expanduser(r"~\Videos"),
-    record_duration=360,
-    cooldown=360,
-    alert_wav=r"E:\EEW\Media\eewwarning.wav",
+    obs_path=r"请填写您的OBS路径，例如：C:\Program Files\obs-studio\bin\64bit\obs64.exe",
+    obs_dir=r"请填写您的OBS目录，例如：C:\Program Files\obs-studio\bin\64bit",
+    record_path=os.path.expanduser(r"~\Videos"),  # 默认录制到用户视频目录
+    record_duration=360,  # 录制时长(秒)
+    cooldown=360,  # 冷却时间(秒)
+    alert_wav=r"请填写您的警报音文件路径，例如：alarm.wav",
     toast_app_name="地震速报监听",
-    trigger_jma_intensity="5弱",
-    trigger_cea_intensity=7.0,
-    ws_jma="wss://ws-api.wolfx.jp/jma_eew",
-    ws_cea="wss://ws.fanstudio.tech/cea",
-    control_port=8787,
-    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    trigger_jma_intensity="5弱",  # JMA触发阈值
+    trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
+    ws_jma="wss://ws-api.wolfx.jp/jma_eew",  # JMA WebSocket地址
+    ws_cea="wss://ws.fanstudio.tech/cea",  # CEA WebSocket地址
+    control_port=8787,  # HTTP控制端口
+    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # 日志目录
 )
 
 
@@ -591,6 +592,7 @@ def menu_open_log(icon, item):
     except Exception as e:
         state.logger.error(f"打开日志失败: {e}")
         try:
+            import webbrowser
             webbrowser.open('file://' + log_file)
         except Exception:
             pass
