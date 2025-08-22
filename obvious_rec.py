@@ -113,12 +113,12 @@ class AppConfig:
 
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    obs_path=r"请填写您的OBS路径，例如：C:\Program Files\obs-studio\bin\64bit\obs64.exe",
-    obs_dir=r"请填写您的OBS目录，例如：C:\Program Files\obs-studio\bin\64bit",
+    obs_path=r"【换成你的OBS可执行文件路径，如】C:\Program Files\obs-studio\bin\64bit\obs64.exe",
+    obs_dir=r"【换成你的OBS路径，如】C:\Program Files\obs-studio\bin\64bit",
     record_path=os.path.expanduser(r"~\Videos"),  # 默认录制到用户视频目录
     record_duration=360,  # 录制时长(秒)
     cooldown=360,  # 冷却时间(秒)
-    alert_wav=r"请填写您的警报音文件路径，例如：alarm.wav",
+    alert_wav=r"【换成你的警报音频路径，如】C:\Users\【用户名】\xxx.wav",
     toast_app_name="地震速报监听",
     trigger_jma_intensity="5弱",  # JMA触发阈值
     trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
@@ -326,6 +326,9 @@ def play_alarm():
 
 def start_recording():
     """启动OBS录制"""
+    # 先停止当前录制（如果存在）
+    stop_recording()
+    
     state.logger.info("启动 OBS 录制…")
     try:
         if os.path.exists(state.config.obs_path):
