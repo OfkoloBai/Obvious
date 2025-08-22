@@ -60,7 +60,7 @@ DEFAULT_CONFIG = AppConfig(
 1. 运行程序：
 
 ```bash
-python quake_monitor.py
+python obvious_rec.py
 ```
 
 ## 配置说明
