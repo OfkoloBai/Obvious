@@ -5,7 +5,6 @@
 感谢[Wolfx Project](https://wolfx.jp/)和[FAN Studio API](https://api.fanstudio.tech/)对本项目的大力支持！
 
 一个用于监听日本气象厅(JMA)和中国地震预警网(CEA)地震预警信息的Python程序。当检测到达到设定阈值的地震时，会自动触发警报和OBS录制。
-感谢[Wolfx Project](https://wolfx.jp/)和[FAN Studio API](https://api.fanstudio.tech/)对本项目的大力支持！
 
 ## 功能特点
 
