@@ -101,10 +101,19 @@ class AppConfig:
     log_backup_count: int = 5
     log_retention_days: int = 30  # 日志保留天数
     
-    # 其他配置
+    # WebSocket连接配置
     ws_reconnect_delay: int = 5  # WebSocket重连延迟(秒)
+    ws_max_reconnect_delay: int = 60  # 最大重连延迟(秒)
+    ws_reconnect_backoff: float = 1.5  # 重连退避系数
+    ws_ping_interval: int = 30  # 常规Ping间隔(秒)
+    ws_ping_timeout: int = 10  # 常规Ping超时(秒)
+    wolfx_ping_interval: int = 55  # Wolfx API Ping间隔(略小于60秒)
+    wolfx_ping_timeout: int = 10  # Wolfx API Ping超时(秒)
+    
+    # 其他配置
     alarm_repeat_count: int = 3  # 警报音重复次数
     log_cleanup_interval: int = 86400  # 日志清理间隔(秒)，默认每天一次
+    debug_mode: bool = False  # 调试模式，开启更详细的日志
     
     def to_dict(self) -> Dict[str, Any]:
         """将配置转换为字典"""
@@ -113,12 +122,12 @@ class AppConfig:
 
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    obs_path=r"【换成你的OBS可执行文件路径，如】C:\Program Files\obs-studio\bin\64bit\obs64.exe",
-    obs_dir=r"【换成你的OBS路径，如】C:\Program Files\obs-studio\bin\64bit",
+    obs_path=r"【改为你自己的OBS可执行文件路径，如C:\Program Files\obs-studio\bin\64bit\obs64.exe】",
+    obs_dir=r"【改为你自己的OBS路径，如C:\Program Files\obs-studio\bin\64bit】",
     record_path=os.path.expanduser(r"~\Videos"),  # 默认录制到用户视频目录
     record_duration=360,  # 录制时长(秒)
     cooldown=360,  # 冷却时间(秒)
-    alert_wav=r"【换成你的警报音频路径，如】C:\Users\【用户名】\music\xxx.wav",
+    alert_wav=r"【改为你自己的音频文件路径，如E:\EEW\Media\eewwarning.wav】",
     toast_app_name="地震速报监听",
     trigger_jma_intensity="5弱",  # JMA触发阈值
     trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
@@ -127,6 +136,18 @@ DEFAULT_CONFIG = AppConfig(
     control_port=8787,  # HTTP控制端口
     log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # 日志目录
 )
+
+
+# =========================
+# 连接状态跟踪类
+# =========================
+class ConnectionStatus:
+    """跟踪WebSocket连接状态"""
+    def __init__(self):
+        self.last_message_time = 0
+        self.connected = False
+        self.reconnect_count = 0
+        self.last_error = None
 
 
 # =========================
@@ -146,6 +167,8 @@ class GlobalState:
         self.tray_icon: Optional[pystray.Icon] = None
         self.tray_icon_running = False  # 添加标志位跟踪托盘状态
         self.lock = threading.Lock()  # 添加线程锁
+        self.jma_status = ConnectionStatus()  # JMA连接状态
+        self.cea_status = ConnectionStatus()  # CEA连接状态
         
     def is_in_cooldown(self) -> bool:
         """检查是否处于冷却时间内"""
@@ -295,6 +318,47 @@ def log_cleanup_loop():
             state.logger.error(f"日志清理循环出错: {e}")
             # 出错后等待一段时间再继续
             time.sleep(3600)  # 1小时
+
+
+def check_network_connection():
+    """检查网络连接状态"""
+    try:
+        # 尝试连接一个可靠的网站
+        import urllib.request
+        urllib.request.urlopen("https://www.google.com", timeout=5)
+        return True
+    except Exception:
+        try:
+            # 备用检查方法
+            import socket
+            socket.create_connection(("8.8.8.8", 53), timeout=5)
+            return True
+        except Exception:
+            return False
+
+
+def status_report_loop():
+    """定期报告连接状态"""
+    while state.program_state != ProgramState.STOPPING:
+        time.sleep(300)  # 每5分钟报告一次
+        
+        jma_status = state.jma_status
+        cea_status = state.cea_status
+        
+        jma_uptime = time.time() - jma_status.last_message_time if jma_status.connected else 0
+        cea_uptime = time.time() - cea_status.last_message_time if cea_status.connected else 0
+        
+        status_msg = (
+            f"状态报告: JMA-{'连接中' if jma_status.connected else '断开'}({jma_status.reconnect_count}次重连), "
+            f"CEA-{'连接中' if cea_status.connected else '断开'}({cea_status.reconnect_count}次重连)"
+        )
+        
+        if jma_status.last_error:
+            status_msg += f", JMA最后错误: {jma_status.last_error}"
+        if cea_status.last_error:
+            status_msg += f", CEA最后错误: {cea_status.last_error}"
+            
+        state.logger.info(status_msg)
 
 
 # =========================
@@ -457,6 +521,20 @@ def on_message_jma(ws, message):
         return
         
     try:
+        # 检查是否是心跳相关的消息
+        if message.strip().lower() in ["ping", "pong", "heartbeat"]:
+            if state.config.debug_mode:
+                state.logger.debug(f"JMA 心跳: {message}")
+            # 对于ping消息，回复pong
+            if message.strip().lower() == "ping":
+                try:
+                    ws.send("pong")
+                    if state.config.debug_mode:
+                        state.logger.debug("JMA 回复pong")
+                except Exception as e:
+                    state.logger.error(f"JMA 回复pong失败: {e}")
+            return
+            
         data = json.loads(message)
         
         # 忽略取消、训练和假设报文
@@ -492,7 +570,9 @@ def on_message_jma(ws, message):
             state.logger.info(f"JMA 更新：最大震度 {max_intensity} (阈值: {state.config.trigger_jma_intensity})")
             
     except json.JSONDecodeError as e:
-        state.logger.error(f"JMA JSON解析错误: {e}")
+        # 如果不是JSON，可能是简单的心跳消息，已经处理过了
+        if message.strip().lower() not in ["ping", "pong", "heartbeat"]:
+            state.logger.error(f"JMA JSON解析错误: {e} - 消息内容: {message}")
     except Exception as e:
         state.logger.error(f"JMA 解析错误: {e}")
 
@@ -542,26 +622,85 @@ def on_message_cea(ws, message):
 
 
 def ws_loop(name: str, url: str, handler: Callable):
-    """WebSocket连接循环（带自动重连）"""
+    """WebSocket连接循环（带自动重连和退避策略）"""
+    reconnect_delay = state.config.ws_reconnect_delay
+    reconnect_attempts = 0
+    max_reconnect_delay = state.config.ws_max_reconnect_delay
+    reconnect_backoff = state.config.ws_reconnect_backoff
+    
+    # 根据名称获取对应的状态对象
+    status_obj = state.jma_status if name == "JMA" else state.cea_status
+    
     while state.program_state != ProgramState.STOPPING:
+        # 检查网络连接
+        if not check_network_connection():
+            state.logger.warning(f"网络连接不可用，等待 {reconnect_delay} 秒后重试")
+            time.sleep(reconnect_delay)
+            continue
+            
         try:
+            state.logger.info(f"{name} 正在连接... (尝试次数: {reconnect_attempts+1}, 延迟: {reconnect_delay}秒)")
+            
+            # 创建WebSocket连接
             ws = websocket.WebSocketApp(
                 url,
                 on_message=handler,
-                on_error=lambda _ws, err: state.logger.error(f"{name} 错误: {err}"),
-                on_close=lambda _ws, code, msg: state.logger.info(f"{name} 关闭: {code} {msg}")
+                on_error=lambda _ws, err: (
+                    state.logger.error(f"{name} 错误: {err}"),
+                    setattr(status_obj, "last_error", str(err))
+                ),
+                on_close=lambda _ws, code, msg: state.logger.info(f"{name} 关闭: {code} {msg}"),
+                on_ping=lambda _ws, data: state.logger.debug(f"{name} 收到ping: {data}") if state.config.debug_mode else None,
+                on_pong=lambda _ws, data: state.logger.debug(f"{name} 收到pong: {data}") if state.config.debug_mode else None
             )
-            ws.on_open = lambda _ws: state.logger.info(f"已连接 {name}")
-            ws.run_forever(ping_interval=25, ping_timeout=10)
+            
+            # 设置连接打开时的回调
+            def on_open(ws):
+                state.logger.info(f"已连接 {name}")
+                status_obj.connected = True
+                status_obj.last_message_time = time.time()
+                status_obj.reconnect_count = 0  # 重置重连计数
+                # 对于Wolfx API，连接后立即发送一个ping以响应服务端的心跳
+                if "wolfx" in url.lower() or "jma" in name.lower():
+                    try:
+                        ws.send("ping")
+                        if state.config.debug_mode:
+                            state.logger.debug(f"{name} 发送初始ping")
+                    except Exception as e:
+                        state.logger.error(f"{name} 发送初始ping失败: {e}")
+            
+            ws.on_open = on_open
+            
+            # 根据API类型设置不同的ping参数
+            ping_interval = state.config.wolfx_ping_interval if "wolfx" in url.lower() or "jma" in name.lower() else state.config.ws_ping_interval
+            ping_timeout = state.config.wolfx_ping_timeout if "wolfx" in url.lower() or "jma" in name.lower() else state.config.ws_ping_timeout
+            
+            ws.run_forever(
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+                ping_payload="ping"  # 明确指定ping载荷
+            )
+            
         except Exception as e:
             state.logger.error(f"{name} run_forever 异常: {e}")
+            status_obj.last_error = str(e)
             
         # 检查是否需要停止
         if state.program_state == ProgramState.STOPPING:
             break
             
-        # 断线重连间隔
-        time.sleep(state.config.ws_reconnect_delay)
+        # 更新连接状态
+        status_obj.connected = False
+        status_obj.reconnect_count += 1
+        reconnect_attempts += 1
+        
+        # 使用退避策略增加重连延迟，但不超最大延迟
+        if reconnect_delay < max_reconnect_delay:
+            new_delay = reconnect_delay * reconnect_backoff
+            reconnect_delay = min(new_delay, max_reconnect_delay)
+        
+        state.logger.info(f"{name} 将在 {reconnect_delay} 秒后尝试重连 (尝试次数: {reconnect_attempts})")
+        time.sleep(reconnect_delay)
 
 
 # =========================
@@ -618,7 +757,7 @@ def menu_quit(icon, item):
 
 def setup_tray():
     """设置系统托盘图标"""
-        # 如果托盘图标已经在运行，则不创建新实例
+    # 如果托盘图标已经在运行，则不创建新实例
     if state.tray_icon_running:
         state.logger.info("托盘图标已在运行，跳过创建")
         return
@@ -762,6 +901,10 @@ def main():
     # 启动日志清理线程
     log_cleanup_thread = threading.Thread(target=log_cleanup_loop, daemon=True)
     log_cleanup_thread.start()
+    
+    # 启动状态报告线程
+    status_thread = threading.Thread(target=status_report_loop, daemon=True)
+    status_thread.start()
     
     state.logger.info(
         f"程序已启动并最小化到托盘 "
