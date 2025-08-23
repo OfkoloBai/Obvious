@@ -1,8 +1,8 @@
 """
-地震速报监听程序 - 建议在PC上使用
+地震速报监听程序 - NSSM服务版本
 监听日本气象厅(JMA)和中国地震预警网(CEA)的地震预警信息
 当检测到达到设定阈值的地震时，自动触发警报和OBS录制
-注意：此代码目前只在Windows10上勉强调试运行过，不一定适合所有人
+注意：此版本专为作为Windows服务运行而优化
 """
 import os
 import json
@@ -15,6 +15,7 @@ import socketserver
 import sys
 import io
 import glob
+import socket
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
@@ -26,9 +27,6 @@ from pathlib import Path
 # 第三方库
 import websocket
 import winsound
-import pystray
-from PIL import Image, ImageDraw
-from win10toast import ToastNotifier
 
 # =========================
 # 枚举和常量定义
@@ -75,12 +73,6 @@ JMA_INTENSITY_MAP = {
 # =========================
 @dataclass
 class AppConfig:
-    # OBS相关配置
-    obs_path: str
-    obs_dir: str
-    record_path: str
-    record_duration: int
-    
     # 触发和冷却配置
     cooldown: int
     trigger_jma_intensity: str
@@ -101,11 +93,23 @@ class AppConfig:
     log_backup_count: int = 5
     log_retention_days: int = 30  # 日志保留天数
     
-    # 其他配置
+    # WebSocket增强配置
     ws_reconnect_delay: int = 5  # WebSocket重连延迟(秒)
+    ws_ping_interval: int = 20   # 发送ping间隔(秒)
+    ws_ping_timeout: int = 10    # 等待pong超时时间(秒)
+    ws_skip_errors: bool = True  # 是否跳过非关键错误继续重连
+    
+    # 其他配置
     alarm_repeat_count: int = 3  # 警报音重复次数
     log_cleanup_interval: int = 86400  # 日志清理间隔(秒)，默认每天一次
     
+    # OBS WebSocket配置
+    obs_host: str = "localhost"          # OBS WebSocket服务器地址
+    obs_port: int = 4455                 # OBS WebSocket端口
+    obs_password: str = "此处写你的OBS WebSocket密码"  # OBS WebSocket密码
+    obs_record_duration: int = 300       # 录制持续时间(秒)，默认5分钟单位秒
+    obs_scene_name: str = "【此处改为你的OBS场景】"     # OBS场景名称
+
     def to_dict(self) -> Dict[str, Any]:
         """将配置转换为字典"""
         return asdict(self)
@@ -113,12 +117,8 @@ class AppConfig:
 
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    obs_path=r"【改为你自己的OBS可执行文件路径，如C:\Program Files\obs-studio\bin\64bit\obs64.exe】",
-    obs_dir=r"【改为你自己的OBS路径，如C:\Program Files\obs-studio\bin\64bit】",
-    record_path=os.path.expanduser(r"~\Videos"),  # 默认录制到用户视频目录
-    record_duration=360,  # 录制时长(秒)
-    cooldown=360,  # 冷却时间(秒)
-    alert_wav=r"【改为你自己的音频文件路径，如E:\EEW\Media\eewwarning.wav】",
+    cooldown=10,  # 冷却时间(秒)
+    alert_wav=r"E:\EEW\Media\eewwarning.wav",
     toast_app_name="地震速报监听",
     trigger_jma_intensity="5弱",  # JMA触发阈值
     trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
@@ -127,6 +127,145 @@ DEFAULT_CONFIG = AppConfig(
     control_port=8787,  # HTTP控制端口
     log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # 日志目录
 )
+
+
+# =========================
+# OBS WebSocket控制器
+# =========================
+class OBSController:
+    """OBS WebSocket控制器"""
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.ws = None
+        self.connected = False
+        self.recording = False
+        self.record_start_time = 0
+        self.lock = threading.Lock()
+        self.connection_attempts = 0
+        self.max_connection_attempts = 3
+        
+    def connect(self) -> bool:
+        """连接到OBS WebSocket服务器"""
+        try:
+            from obswebsocket import obsws, requests
+            self.ws = obsws(
+                self.config.obs_host, 
+                self.config.obs_port, 
+                self.config.obs_password
+            )
+            self.ws.connect()
+            self.connected = True
+            self.connection_attempts = 0
+            state.logger.info("成功连接到OBS WebSocket服务器")
+            return True
+        except Exception as e:
+            self.connection_attempts += 1
+            state.logger.error(f"连接OBS失败 ({self.connection_attempts}/{self.max_connection_attempts}): {e}")
+            self.connected = False
+            return False
+            
+    def ensure_connection(self) -> bool:
+        """确保OBS连接正常，如果未连接则尝试连接"""
+        if self.connected:
+            return True
+            
+        if self.connection_attempts >= self.max_connection_attempts:
+            # 等待一段时间后再尝试重连
+            time.sleep(30)
+            self.connection_attempts = 0
+            
+        return self.connect()
+            
+    def disconnect(self):
+        """断开OBS连接"""
+        if self.ws and self.connected:
+            try:
+                self.ws.disconnect()
+            except:
+                pass
+            finally:
+                self.connected = False
+            
+    def start_recording(self) -> bool:
+        """开始录制"""
+        if not self.ensure_connection():
+            return False
+            
+        try:
+            from obswebsocket import requests
+            
+            # 确保使用正确的场景
+            if self.config.obs_scene_name:
+                try:
+                    self.ws.call(requests.SetCurrentProgramScene(
+                        sceneName=self.config.obs_scene_name
+                    ))
+                except Exception as e:
+                    state.logger.warning(f"设置OBS场景失败: {e}")
+                    # 场景设置失败不影响录制
+                
+            # 开始录制
+            response = self.ws.call(requests.StartRecord())
+            if response.status:
+                with self.lock:
+                    self.recording = True
+                    self.record_start_time = time.time()
+                state.logger.info("OBS录制已开始")
+                return True
+            else:
+                state.logger.error("OBS录制启动失败")
+                # 录制失败可能是连接问题，重置连接状态
+                self.connected = False
+                return False
+                
+        except Exception as e:
+            state.logger.error(f"启动OBS录制失败: {e}")
+            self.connected = False
+            return False
+            
+    def stop_recording(self) -> bool:
+        """停止录制"""
+        if not self.connected:
+            return False
+            
+        try:
+            from obswebsocket import requests
+            response = self.ws.call(requests.StopRecord())
+            if response.status:
+                with self.lock:
+                    self.recording = False
+                state.logger.info("OBS录制已停止")
+                return True
+            else:
+                state.logger.error("OBS录制停止失败")
+                return False
+                
+        except Exception as e:
+            state.logger.error(f"停止OBS录制失败: {e}")
+            self.connected = False
+            return False
+            
+    def is_recording(self) -> bool:
+        """检查是否正在录制"""
+        with self.lock:
+            return self.recording
+            
+    def check_and_stop_recording(self):
+        """检查录制时间并停止超时的录制"""
+        with self.lock:
+            if (self.recording and 
+                time.time() - self.record_start_time > self.config.obs_record_duration):
+                self.stop_recording()
+                
+    def recording_loop(self):
+        """录制监控循环"""
+        while state.program_state != ProgramState.STOPPING:
+            try:
+                self.check_and_stop_recording()
+                time.sleep(5)  # 每5秒检查一次
+            except Exception as e:
+                state.logger.error(f"OBS监控循环出错: {e}")
+                time.sleep(30)  # 出错后等待30秒再继续
 
 
 # =========================
@@ -140,12 +279,11 @@ class GlobalState:
         self.program_state = ProgramState.RUNNING
         self.last_trigger_time = 0.0
         self.triggered_event_ids: Set[str] = set()
-        self.obs_process: Optional[subprocess.Popen] = None
         self.logger: Optional[logging.Logger] = None
-        self.toast = ToastNotifier()
-        self.tray_icon: Optional[pystray.Icon] = None
-        self.tray_icon_running = False  # 添加标志位跟踪托盘状态
         self.lock = threading.Lock()  # 添加线程锁
+        self.ws_connections = {}  # 跟踪WebSocket连接状态
+        self.is_service = False  # 标记是否作为服务运行
+        self.obs_controller: Optional[OBSController] = None  # OBS控制器
         
     def is_in_cooldown(self) -> bool:
         """检查是否处于冷却时间内"""
@@ -163,20 +301,20 @@ class GlobalState:
         """检查事件是否已触发过"""
         return event_id in self.triggered_event_ids
     
-    def set_obs_process(self, process: subprocess.Popen):
-        """设置OBS进程"""
-        self.obs_process = process
-        
+    def init_obs_controller(self):
+        """初始化OBS控制器"""
+        self.obs_controller = OBSController(self.config)
+        # 尝试连接OBS
+        if self.obs_controller.connect():
+            self.logger.info("OBS控制器初始化成功")
+        else:
+            self.logger.warning("OBS控制器初始化失败，录制功能可能不可用")
+    
     def cleanup(self):
         """清理资源"""
-        self.stop_recording()
-        if self.tray_icon:
-            try:
-                self.tray_icon.stop()
-                self.tray_icon = None
-            except Exception as e:
-                self.logger.error(f"停止托盘图标时出错: {e}")
-        self.tray_icon_running = False  # 重置标志位
+        if self.obs_controller:
+            self.obs_controller.disconnect()
+
 
 # 全局状态实例
 state = GlobalState()
@@ -209,15 +347,16 @@ def setup_logging() -> logging.Logger:
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
     
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
-    ))
+    # 只有在非服务模式下才添加控制台处理器
+    if not state.is_service:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        ))
+        logger.addHandler(console_handler)
     
-    # 添加处理器
+    # 添加文件处理器
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
     
     return logger
 
@@ -227,9 +366,6 @@ def validate_config(config: AppConfig) -> bool:
     errors = []
     
     # 检查必要文件路径
-    if not os.path.exists(config.obs_path):
-        errors.append(f"OBS路径不存在: {config.obs_path}")
-    
     if not os.path.exists(config.alert_wav):
         errors.append(f"警报音文件不存在: {config.alert_wav}")
     
@@ -297,6 +433,27 @@ def log_cleanup_loop():
             time.sleep(3600)  # 1小时
 
 
+def check_network_connection():
+    """检查网络连接状态"""
+    try:
+        # 尝试连接一个可靠的网站
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        return True
+    except OSError:
+        return False
+
+
+def is_running_as_service():
+    """检测是否作为Windows服务运行"""
+    try:
+        # 检查是否有控制台窗口
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        return kernel32.GetConsoleWindow() == 0
+    except:
+        return False
+
+
 # =========================
 # 核心功能函数
 # =========================
@@ -322,68 +479,6 @@ def play_alarm():
                 time.sleep(1)  # 系统声音通常较短
     except Exception as e:
         state.logger.error(f"警报音播放失败: {e}")
-
-
-def start_recording():
-    """启动OBS录制"""
-    # 先停止当前录制（如果存在）
-    stop_recording()
-    
-    state.logger.info("启动 OBS 录制…")
-    try:
-        if os.path.exists(state.config.obs_path):
-            # 使用subprocess.Popen启动OBS并记录进程对象
-            process = subprocess.Popen(
-                [
-                    state.config.obs_path, 
-                    "--startrecording", 
-                    "--minimize-to-tray", 
-                    "--recording-path", 
-                    state.config.record_path
-                ], 
-                cwd=state.config.obs_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            state.set_obs_process(process)
-        else:
-            state.logger.error(f"OBS路径不存在: {state.config.obs_path}")
-            return False
-    except Exception as e:
-        state.logger.error(f"启动 OBS 失败: {e}")
-        return False
-    
-    # 设置定时停止录制
-    if state.config.record_duration and state.config.record_duration > 0:
-        timer = threading.Timer(state.config.record_duration, stop_recording)
-        timer.daemon = True
-        timer.start()
-    
-    return True
-
-
-def stop_recording():
-    """停止OBS录制"""
-    state.logger.info("停止 OBS 录制…")
-    try:
-        # 只停止由我们启动的OBS进程
-        if state.obs_process and state.obs_process.poll() is None:
-            # 使用OBS命令行参数停止录制
-            subprocess.Popen(
-                [state.config.obs_path, "--stoprecording"], 
-                cwd=state.config.obs_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            # 等待一段时间后关闭OBS
-            time.sleep(5)  # 给OBS一些时间处理停止命令
-            if state.obs_process and state.obs_process.poll() is None:
-                state.obs_process.terminate()  # 温和地终止进程
-                state.obs_process.wait(timeout=10)  # 等待进程结束
-    except Exception as e:
-        state.logger.error(f"停止录制失败: {e}")
-    finally:
-        state.set_obs_process(None)
 
 
 def unified_trigger(source: AlertSource, lines: List[str], event_id: Optional[str] = None):
@@ -430,19 +525,28 @@ def unified_trigger(source: AlertSource, lines: List[str], event_id: Optional[st
     def trigger_operations():
         state.logger.info(f"触发来源: {source_name}\n{content}")
         
-        # 显示通知
-        state.toast.show_toast(
-            state.config.toast_app_name, 
-            f"触发：{source_name}", 
-            duration=3, 
-            threaded=True
-        )
-        
         # 播放警报
         play_alarm()
         
-        # 启动录制
-        start_recording()
+        # 启动OBS录制（如果配置了OBS）
+        if state.obs_controller:
+            # 在单独的线程中启动录制，避免阻塞
+            def start_obs_recording():
+                # 如果正在录制，先停止当前录制
+                if state.obs_controller.is_recording():
+                    state.logger.info("检测到已有录制正在进行，先停止当前录制")
+                    state.obs_controller.stop_recording()
+                    time.sleep(1)  # 等待1秒确保录制停止
+                
+                # 开始新的录制
+                if state.obs_controller.start_recording():
+                    state.logger.info("地震触发OBS录制已启动")
+                else:
+                    state.logger.warning("无法启动OBS录制")
+            
+            obs_thread = threading.Thread(target=start_obs_recording)
+            obs_thread.daemon = True
+            obs_thread.start()
     
     # 启动线程执行触发操作
     threading.Thread(target=trigger_operations, daemon=True).start()
@@ -543,8 +647,27 @@ def on_message_cea(ws, message):
 
 def ws_loop(name: str, url: str, handler: Callable):
     """WebSocket连接循环（带自动重连）"""
+    reconnect_delay = state.config.ws_reconnect_delay
+    max_reconnect_delay = 300  # 最大重连延迟5分钟
+    
     while state.program_state != ProgramState.STOPPING:
         try:
+            state.logger.info(f"正在连接 {name}...")
+            
+            # 检查网络连接
+            if not check_network_connection():
+                state.logger.warning(f"网络连接不可用，等待 {reconnect_delay} 秒后重试...")
+                time.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                continue
+            
+            # 记录连接状态
+            state.ws_connections[name] = {
+                'status': 'connecting',
+                'last_activity': time.time(),
+                'url': url
+            }
+            
             ws = websocket.WebSocketApp(
                 url,
                 on_message=handler,
@@ -552,105 +675,42 @@ def ws_loop(name: str, url: str, handler: Callable):
                 on_close=lambda _ws, code, msg: state.logger.info(f"{name} 关闭: {code} {msg}")
             )
             ws.on_open = lambda _ws: state.logger.info(f"已连接 {name}")
-            ws.run_forever(ping_interval=25, ping_timeout=10)
+            
+            # 更新连接状态
+            state.ws_connections[name]['status'] = 'connected'
+            
+            # 重置重连延迟
+            reconnect_delay = state.config.ws_reconnect_delay
+            
+            # 运行WebSocket，设置合理的心跳参数
+            ws.run_forever(
+                ping_interval=state.config.ws_ping_interval,
+                ping_timeout=state.config.ws_ping_timeout,
+                ping_payload="",  # 使用空字符串作为ping载荷
+                skip_utf8_validation=state.config.ws_skip_errors
+            )
+            
+        except websocket.WebSocketConnectionClosedException:
+            state.logger.warning(f"{name} 连接已关闭，尝试重连...")
+        except websocket.WebSocketTimeoutException:
+            state.logger.warning(f"{name} 连接超时，尝试重连...")
         except Exception as e:
-            state.logger.error(f"{name} run_forever 异常: {e}")
+            state.logger.error(f"{name} 连接异常: {e}")
             
         # 检查是否需要停止
         if state.program_state == ProgramState.STOPPING:
             break
             
-        # 断线重连间隔
-        time.sleep(state.config.ws_reconnect_delay)
-
-
-# =========================
-# 托盘图标功能
-# =========================
-def create_icon_image() -> Image.Image:
-    """创建托盘图标"""
-    img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((8, 8, 56, 56), fill=(220, 20, 60, 230))
-    return img
-
-
-def menu_toggle(icon, item):
-    """切换监听状态"""
-    state.monitoring_enabled = not state.monitoring_enabled
-    state_text = "恢复监听" if state.monitoring_enabled else "暂停监听"
-    state.logger.info(state_text)
-    state.toast.show_toast(state.config.toast_app_name, state_text, duration=2, threaded=True)
-
-
-def menu_open_log(icon, item):
-    """打开日志文件"""
-    log_file = os.path.join(state.config.log_dir, "quake_monitor.log")
-    
-    try:
-        if os.path.exists(log_file):
-            os.startfile(log_file)
-        else:
-            state.logger.error("日志文件不存在")
-    except Exception as e:
-        state.logger.error(f"打开日志失败: {e}")
-        try:
-            import webbrowser
-            webbrowser.open('file://' + log_file)
-        except Exception:
-            pass
-
-
-def menu_cleanup_logs(icon, item):
-    """手动清理日志文件"""
-    state.logger.info("手动清理日志文件")
-    cleanup_old_logs()
-    state.toast.show_toast(state.config.toast_app_name, "已清理旧日志文件", duration=2, threaded=True)
-
-
-def menu_quit(icon, item):
-    """退出程序"""
-    state.logger.info("退出程序")
-    state.program_state = ProgramState.STOPPING
-    state.cleanup()
-    icon.stop()
-
-
-def setup_tray():
-    """设置系统托盘图标"""
-        # 如果托盘图标已经在运行，则不创建新实例
-    if state.tray_icon_running:
-        state.logger.info("托盘图标已在运行，跳过创建")
-        return
+        # 更新连接状态
+        state.ws_connections[name]['status'] = 'disconnected'
+            
+        # 使用指数退避策略进行重连
+        state.logger.info(f"{reconnect_delay}秒后尝试重连{name}...")
+        time.sleep(reconnect_delay)
         
-    try:
-        icon = pystray.Icon(
-            "quake_monitor", 
-            create_icon_image(), 
-            "地震速报监听",
-            menu=pystray.Menu(
-                pystray.MenuItem("暂停/恢复监听", menu_toggle),
-                pystray.MenuItem("打开日志", menu_open_log),
-                pystray.MenuItem("清理日志", menu_cleanup_logs),
-                pystray.MenuItem("退出", menu_quit)
-            )
-        )
-        # 设置标志位
-        state.tray_icon_running = True
-        # 在单独线程中运行托盘图标
-        def run_icon():
-            try:
-                icon.run()
-            finally:
-                # 确保在图标停止时更新状态
-                state.tray_icon_running = False
-        
-        threading.Thread(target=run_icon, daemon=True).start()
-        state.tray_icon = icon
-        state.logger.info("托盘图标已创建")
-    except Exception as e:
-        state.logger.error(f"创建托盘图标失败: {e}")
-        state.tray_icon_running = False
+        # 增加下次重连的等待时间，但不超过最大值
+        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
 
 # =========================
 # HTTP控制服务器
@@ -686,14 +746,6 @@ class ControlHandler(http.server.BaseHTTPRequestHandler):
             ]
             unified_trigger(AlertSource.TEST, lines, None)
             self._ok("triggered")
-
-        elif cmd == "startrec":
-            start_recording()
-            self._ok("startrec")
-
-        elif cmd == "stoprec":
-            stop_recording()
-            self._ok("stoprec")
             
         elif cmd == "status":
             status = "running" if state.monitoring_enabled else "paused"
@@ -702,6 +754,36 @@ class ControlHandler(http.server.BaseHTTPRequestHandler):
         elif cmd == "cleanuplogs":
             cleanup_old_logs()
             self._ok("logs cleaned")
+            
+        elif cmd == "wsstatus":
+            # 返回WebSocket连接状态
+            self._ok(json.dumps(state.ws_connections))
+            
+        elif cmd == "obsstatus":
+            # 返回OBS状态
+            if state.obs_controller:
+                status = {
+                    "connected": state.obs_controller.connected,
+                    "recording": state.obs_controller.is_recording(),
+                    "record_duration": state.config.obs_record_duration
+                }
+                self._ok(json.dumps(status))
+            else:
+                self._ok("OBS控制器未初始化")
+                
+        elif cmd == "obsstart":
+            # 手动启动OBS录制
+            if state.obs_controller and state.obs_controller.start_recording():
+                self._ok("OBS录制已启动")
+            else:
+                self._ok("OBS录制启动失败")
+                
+        elif cmd == "obsstop":
+            # 手动停止OBS录制
+            if state.obs_controller and state.obs_controller.stop_recording():
+                self._ok("OBS录制已停止")
+            else:
+                self._ok("OBS录制停止失败")
 
         else:
             self._ok("unknown command")
@@ -735,6 +817,9 @@ def start_control_server():
 # =========================
 def main():
     """主程序入口"""
+    # 检测是否作为服务运行
+    state.is_service = is_running_as_service()
+    
     # 重定向 stderr 以过滤特定错误
     original_stderr = sys.stderr
     sys.stderr = FilteredStderr(original_stderr.buffer, 
@@ -756,26 +841,28 @@ def main():
         return
     
     # 初始化组件
-    setup_tray()
     start_control_server()
+    
+    # 初始化OBS控制器
+    state.init_obs_controller()
     
     # 启动日志清理线程
     log_cleanup_thread = threading.Thread(target=log_cleanup_loop, daemon=True)
     log_cleanup_thread.start()
     
+    # 启动OBS录制监控线程
+    if state.obs_controller:
+        obs_monitor_thread = threading.Thread(target=state.obs_controller.recording_loop, daemon=True)
+        obs_monitor_thread.start()
+    
     state.logger.info(
-        f"程序已启动并最小化到托盘 "
+        f"程序已启动 "
         f"(JMA阈值: {state.config.trigger_jma_intensity}, "
         f"CEA阈值: {state.config.trigger_cea_intensity}, "
         f"日志保留天数: {state.config.log_retention_days})"
     )
     
-    state.toast.show_toast(
-        state.config.toast_app_name, 
-        "程序已启动", 
-        duration=2, 
-        threaded=True
-    )
+    state.logger.info(f"运行模式: {'服务模式' if state.is_service else '控制台模式'}")
 
     # 启动两个 WS 线程
     jma_thread = threading.Thread(
