@@ -1,7 +1,5 @@
 @echo off
-:menu
-cls
-echo ObviousRec_nssm_service_manager
+echo 【此处填写你注册的NSSM服务名】_nssm_service_manager
 echo.
 echo 1. start
 echo 2. stop
@@ -13,28 +11,22 @@ echo.
 set /p choice="please select an operation (1-6): "
 
 if "%choice%"=="1" (
-    nssm start ObviousRec
+    nssm start 【【此处填写你注册的NSSM服务名】】
     pause
-    goto menu
 ) else if "%choice%"=="2" (
-    nssm stop ObviousRec
+    nssm stop 【此处填写你注册的NSSM服务名】
     pause
-    goto menu
 ) else if "%choice%"=="3" (
-    nssm restart ObviousRec
+    nssm restart 【此处填写你注册的NSSM服务名】
     pause
-    goto menu
 ) else if "%choice%"=="4" (
-    nssm status ObviousRec
+    nssm status 【此处填写你注册的NSSM服务名】
     pause
-    goto menu
 ) else if "%choice%"=="5" (
-    notepad "E:\EEW\service.log"
-    goto menu
+    notepad "【此处填写你的日志路径】"
 ) else if "%choice%"=="6" (
     exit
 ) else (
-    echo invalid choice
+    echo invailid choice
     pause
-    goto menu
 )
