@@ -118,7 +118,7 @@ class AppConfig:
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
     cooldown=10,  # 冷却时间(秒)
-    alert_wav=r"E:\EEW\Media\eewwarning.wav",
+    alert_wav=r"【此处填写你的音频文件位置】",
     toast_app_name="地震速报监听",
     trigger_jma_intensity="5弱",  # JMA触发阈值
     trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
