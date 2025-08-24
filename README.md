@@ -107,12 +107,6 @@ curl "http://127.0.0.1:8787/command?cmd=test"
 # 获取当前状态
 curl "http://127.0.0.1:8787/command?cmd=status"
 
-# 开始录制
-curl "http://127.0.0.1:8787/command?cmd=startrec"
-
-# 停止录制
-curl "http://127.0.0.1:8787/command?cmd=stoprec"
-
 # 清理日志
 curl "http://127.0.0.1:8787/command?cmd=cleanuplogs"
 ```
