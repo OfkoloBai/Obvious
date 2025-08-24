@@ -106,9 +106,13 @@ class AppConfig:
     # OBS WebSocket配置
     obs_host: str = "localhost"          # OBS WebSocket服务器地址
     obs_port: int = 4455                 # OBS WebSocket端口
-    obs_password: str = "此处写你的OBS WebSocket密码"  # OBS WebSocket密码
+    obs_password: str = "【此处填写你的OBS WebSocket服务器密码】"  # OBS WebSocket密码
     obs_record_duration: int = 300       # 录制持续时间(秒)，默认5分钟，单位秒
-    obs_scene_name: str = "【此处改为你的OBS场景】"     # OBS场景名称
+    obs_scene_name: str = "【此处填写你的OBS录制场景】"     # OBS场景名称
+
+    # 服务重启配置
+    service_name: str = "【如果你是使用服务运行的此程序，此处填写你注册的服务名】"  # Windows服务名称
+    restart_delay: int = 5  # 重启服务前的延迟时间(秒)
 
     def to_dict(self) -> Dict[str, Any]:
         """将配置转换为字典"""
@@ -117,8 +121,8 @@ class AppConfig:
 
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    cooldown=10,  # 冷却时间(秒)
-    alert_wav=r"【此处填写你的音频文件位置】",
+    cooldown=300,  # 冷却时间(秒)
+    alert_wav=r"【此处填写你的音频文件路径】",
     toast_app_name="地震速报监听",
     trigger_jma_intensity="5弱",  # JMA触发阈值
     trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
@@ -143,6 +147,7 @@ class OBSController:
         self.lock = threading.Lock()
         self.connection_attempts = 0
         self.max_connection_attempts = 3
+        self.auto_stop_timer = None
         
     def connect(self) -> bool:
         """连接到OBS WebSocket服务器"""
@@ -210,6 +215,10 @@ class OBSController:
                 with self.lock:
                     self.recording = True
                     self.record_start_time = time.time()
+                
+                # 设置自动停止计时器
+                self._setup_auto_stop_timer()
+                
                 state.logger.info("OBS录制已开始")
                 return True
             else:
@@ -222,6 +231,52 @@ class OBSController:
             state.logger.error(f"启动OBS录制失败: {e}")
             self.connected = False
             return False
+            
+    def _setup_auto_stop_timer(self):
+        """设置自动停止录制计时器"""
+        # 取消现有的计时器
+        if self.auto_stop_timer and self.auto_stop_timer.is_alive():
+            self.auto_stop_timer.cancel()
+        
+        # 创建新的计时器
+        self.auto_stop_timer = threading.Timer(
+            self.config.obs_record_duration,
+            self._on_recording_timeout
+        )
+        self.auto_stop_timer.daemon = True
+        self.auto_stop_timer.start()
+        
+    def _on_recording_timeout(self):
+        """录制超时处理"""
+        if self.is_recording():
+            state.logger.info("录制时间到达，自动停止录制")
+            self.stop_recording()
+            
+            # 延迟后重启服务
+            state.logger.info(f"{self.config.restart_delay}秒后重启服务...")
+            time.sleep(self.config.restart_delay)
+            self._restart_service()
+            
+    def _restart_service(self):
+        """重启Windows服务"""
+        try:
+            service_name = self.config.service_name
+            state.logger.info(f"正在重启服务: {service_name}")
+            
+            # 停止服务
+            subprocess.run(["net", "stop", service_name], check=True, timeout=30)
+            state.logger.info("服务已停止")
+            
+            # 启动服务
+            subprocess.run(["net", "start", service_name], check=True, timeout=30)
+            state.logger.info("服务已启动")
+            
+        except subprocess.CalledProcessError as e:
+            state.logger.error(f"服务重启失败: {e}")
+        except subprocess.TimeoutExpired:
+            state.logger.error("服务重启超时")
+        except Exception as e:
+            state.logger.error(f"服务重启过程中发生错误: {e}")
             
     def stop_recording(self) -> bool:
         """停止录制"""
@@ -313,6 +368,9 @@ class GlobalState:
     def cleanup(self):
         """清理资源"""
         if self.obs_controller:
+            # 取消自动停止计时器
+            if self.obs_controller.auto_stop_timer and self.obs_controller.auto_stop_timer.is_alive():
+                self.obs_controller.auto_stop_timer.cancel()
             self.obs_controller.disconnect()
 
 
