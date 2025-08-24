@@ -17,7 +17,7 @@ import io
 import glob
 import socket
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, List, Callable, Set
 from logging.handlers import RotatingFileHandler
@@ -107,12 +107,15 @@ class AppConfig:
     obs_host: str = "localhost"          # OBS WebSocket服务器地址
     obs_port: int = 4455                 # OBS WebSocket端口
     obs_password: str = "【此处填写你的OBS WebSocket服务器密码】"  # OBS WebSocket密码
-    obs_record_duration: int = 300       # 录制持续时间(秒)，默认5分钟，单位秒
-    obs_scene_name: str = "【此处填写你的OBS录制场景】"     # OBS场景名称
+    obs_record_duration: int = 600       # 录制持续时间(秒)，默认10分钟，单位秒
+    obs_scene_name: str = 【此处填写你的OBS录制场景】"     # OBS场景名称
 
     # 服务重启配置
     service_name: str = "【如果你是使用服务运行的此程序，此处填写你注册的服务名】"  # Windows服务名称
     restart_delay: int = 5  # 重启服务前的延迟时间(秒)
+
+    # 时间窗口配置
+    time_window_minutes: int = 10  # 时间窗口（分钟），默认10分钟
 
     def to_dict(self) -> Dict[str, Any]:
         """将配置转换为字典"""
@@ -121,15 +124,16 @@ class AppConfig:
 
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
-    cooldown=300,  # 冷却时间(秒)
-    alert_wav=r"【此处填写你的音频文件路径】",
+    cooldown=600,  # 冷却时间(秒)，建议等于或略小于录制时长
+    alert_wav=r"【在此处填写你的音频文件路径】",
     toast_app_name="地震速报监听",
-    trigger_jma_intensity="5弱",  # JMA触发阈值
-    trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
+    trigger_jma_intensity="3",  # JMA触发阈值
+    trigger_cea_intensity=5.5,  # CEA触发阈值(烈度)
     ws_jma="wss://ws-api.wolfx.jp/jma_eew",  # JMA WebSocket地址
     ws_cea="wss://ws.fanstudio.tech/cea",  # CEA WebSocket地址
     control_port=8787,  # HTTP控制端口
-    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # 日志目录
+    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"),  # 日志目录
+    time_window_minutes= 10 # 时间窗口（分钟）,在<--此处修改为你想要的值,但建议大于录制时长
 )
 
 
@@ -324,6 +328,92 @@ class OBSController:
 
 
 # =========================
+# 时间处理工具函数
+# =========================
+def parse_datetime_with_timezone(datetime_str: str, timezone_offset: int) -> Optional[datetime]:
+    """
+    解析日期时间字符串并应用时区偏移
+    
+    Args:
+        datetime_str: 日期时间字符串
+        timezone_offset: 时区偏移（小时），例如UTC+8为8，UTC+9为9
+        
+    Returns:
+        datetime对象或None（如果解析失败）
+    """
+    try:
+        # 尝试解析不同的日期时间格式
+        formats = [
+            "%Y/%m/%d %H:%M:%S",  # JMA格式
+            "%Y-%m-%d %H:%M:%S",  # CEA格式
+            "%Y年%m月%d日 %H:%M:%S",  # 中文格式
+            "%Y-%m-%dT%H:%M:%S",  # ISO格式（带T）
+            "%Y-%m-%dT%H:%M:%S.%fZ",  # ISO格式（带毫秒和Z）
+            "%Y-%m-%dT%H:%M:%S.%f",  # ISO格式（带毫秒）
+            "%Y-%m-%d %H:%M:%S.%f"  # 带毫秒的标准格式
+        ]
+        
+        dt = None
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(datetime_str, fmt)
+                break
+            except ValueError:
+                continue
+                
+        if dt is None:
+            state.logger.warning(f"无法解析日期时间字符串: {datetime_str}")
+            return None
+            
+        # 应用时区偏移
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=timezone_offset)))
+        return dt
+        
+    except Exception as e:
+        state.logger.error(f"解析日期时间失败 '{datetime_str}': {e}")
+        return None
+
+
+def is_within_time_window(event_time_str: str, timezone_offset: int, window_minutes: int = None) -> bool:
+    """
+    检查事件时间是否在当前时间的指定时间窗口内
+    
+    Args:
+        event_time_str: 事件时间字符串
+        timezone_offset: 事件时间的时区偏移（小时）
+        window_minutes: 时间窗口（分钟），如果为None则使用配置中的值
+        
+    Returns:
+        bool: 是否在时间窗口内
+    """
+    # 使用配置的时间窗口如果未指定
+    if window_minutes is None:
+        window_minutes = state.config.time_window_minutes
+        
+    # 解析事件时间
+    event_dt = parse_datetime_with_timezone(event_time_str, timezone_offset)
+    if event_dt is None:
+        state.logger.warning(f"无法解析事件时间: {event_time_str}")
+        return False
+        
+    # 获取当前时间（UTC+8）
+    current_dt = datetime.now(timezone(timedelta(hours=8)))
+    
+    # 将事件时间转换为UTC+8时区
+    event_dt_utc8 = event_dt.astimezone(timezone(timedelta(hours=8)))
+    
+    # 计算时间差
+    time_diff = current_dt - event_dt_utc8
+    time_diff_seconds = abs(time_diff.total_seconds())
+    
+    # 记录时间差信息
+    state.logger.info(f"事件时间: {event_dt_utc8}, 当前时间: {current_dt}, 时间差: {time_diff_seconds:.1f}秒, 窗口: {window_minutes}分钟")
+    
+    # 检查是否在时间窗口内
+    return time_diff_seconds <= window_minutes * 60
+
+
+# =========================
 # 全局状态管理类
 # =========================
 class GlobalState:
@@ -433,6 +523,10 @@ def validate_config(config: AppConfig) -> bool:
     
     if config.trigger_cea_intensity <= 0:
         errors.append(f"CEA阈值必须大于0: {config.trigger_cea_intensity}")
+    
+    # 检查时间窗口有效性
+    if config.time_window_minutes <= 0:
+        errors.append(f"时间窗口必须大于0: {config.time_window_minutes}")
     
     # 记录所有错误
     if errors:
@@ -641,6 +735,11 @@ def on_message_jma(ws, message):
             ann = data.get("AnnouncedTime", "")
             eid = str(data.get("EventID", ""))
             
+            # 检查时间是否在配置的时间窗口内 (JMA是UTC+9)
+            if not is_within_time_window(ann, 9):
+                state.logger.info(f"JMA 事件 {eid} 发布时间 {ann} 不在时间窗口内，忽略")
+                return
+            
             lines = [
                 f"地点: {place}",
                 f"最大震度: {max_intensity}",
@@ -685,6 +784,11 @@ def on_message_cea(ws, message):
             
         # 检查是否达到阈值
         if epi_val >= state.config.trigger_cea_intensity:
+            # 检查时间是否在配置的时间窗口内 (CEA是UTC+8)
+            if not is_within_time_window(shock, 8):
+                state.logger.info(f"CEA 事件 {eid} 发震时刻 {shock} 不在时间窗口内，忽略")
+                return
+            
             lines = [
                 f"地点: {place}",
                 f"预估烈度: {epi_val}",
@@ -842,6 +946,22 @@ class ControlHandler(http.server.BaseHTTPRequestHandler):
                 self._ok("OBS录制已停止")
             else:
                 self._ok("OBS录制停止失败")
+                
+        elif cmd == "timewindow":
+            # 获取或设置时间窗口
+            if "value" in qs:
+                try:
+                    new_value = int(qs["value"][0])
+                    if new_value > 0:
+                        state.config.time_window_minutes = new_value
+                        state.logger.info(f"时间窗口已设置为 {new_value} 分钟")
+                        self._ok(f"时间窗口已设置为 {new_value} 分钟")
+                    else:
+                        self._ok("时间窗口必须大于0")
+                except ValueError:
+                    self._ok("无效的时间窗口值")
+            else:
+                self._ok(str(state.config.time_window_minutes))
 
         else:
             self._ok("unknown command")
@@ -917,6 +1037,7 @@ def main():
         f"程序已启动 "
         f"(JMA阈值: {state.config.trigger_jma_intensity}, "
         f"CEA阈值: {state.config.trigger_cea_intensity}, "
+        f"时间窗口: {state.config.time_window_minutes}分钟, "
         f"日志保留天数: {state.config.log_retention_days})"
     )
     
