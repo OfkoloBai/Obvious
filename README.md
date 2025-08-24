@@ -62,8 +62,10 @@ DEFAULT_CONFIG = AppConfig(
 4. 运行程序：
 
 ```bash
-python obvious_rec.py
+python obvious_rec.py  
 ```
+其次，为了更稳定运行，我们建议使用[NSSM](https://nssm.cc/download)将程序加载为Windows服务来运行
+
 
 ## 配置说明
 
