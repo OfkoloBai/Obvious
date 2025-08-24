@@ -107,7 +107,7 @@ class AppConfig:
     obs_host: str = "localhost"          # OBS WebSocket服务器地址
     obs_port: int = 4455                 # OBS WebSocket端口
     obs_password: str = "此处写你的OBS WebSocket密码"  # OBS WebSocket密码
-    obs_record_duration: int = 300       # 录制持续时间(秒)，默认5分钟单位秒
+    obs_record_duration: int = 300       # 录制持续时间(秒)，默认5分钟，单位秒
     obs_scene_name: str = "【此处改为你的OBS场景】"     # OBS场景名称
 
     def to_dict(self) -> Dict[str, Any]:
