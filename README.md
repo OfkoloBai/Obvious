@@ -39,7 +39,7 @@ git clone <仓库地址>
 2. 安装必要的Python依赖：
 
 ```bash
-pip install websocket-client winsound pystray pillow win10toast
+pip install websocket-client websockets winsound pystray pillow win10toast obs-websocket-py requests
 ```
 
 3. 根据您的环境修改代码中的配置项（特别是OBS路径和警报音文件路径）
