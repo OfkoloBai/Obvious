@@ -1,137 +1,153 @@
-****
+# 地震速报监听自动录制程序 - Obvious
 
-# 地震速报监听程序Obvious
-
-感谢[Wolfx Project](https://wolfx.jp/)和[FAN Studio API](https://api.fanstudio.tech/)对本项目的大力支持！
-
-一个用于监听日本气象厅(JMA)，中国地震预警网(CEA)和台湾气象署(CWA)地震预警信息的Python程序。当检测到达到设定阈值的地震时，会自动触发警报和OBS录制。
-
-# 已知 Bug
-
- ⚠️ 注意： 本程序在第一次自动录制自动停止录制后，会由于不明原因无法再次自动启动录制！
- 
- 解决方法： 本程序在第一次触发录制后自动结束录制时会自动退出刷新状态，如要重新使用，烦请手动再次打开
+一个用于监听日本气象厅(JMA)、中国地震预警网(CEA)和台湾气象署(CWA)地震预警信息的Windows服务程序。当检测到达到设定阈值的地震时，自动触发警报和OBS录制功能。
 
 ## 功能特点
 
-- 监听日本气象厅(JMA)，中国地震预警网(CEA)和台湾气象署(CWA)的地震预警信息
-- 可自定义触发阈值（JMA震度，CEA烈度和CWA震度）
-- 达到阈值时自动播放警报音效
-- 自动启动OBS进行录制
-- 使用NSSM服务更佳！
-- HTTP API远程控制
-- 详细的日志记录和轮转
+- 🔔 **多源监听**: 同时监听日本(JMA)、中国(CEA)和台湾(CWA)的地震预警信息
+- 📹 **自动录制**: 检测到地震时自动触发OBS录制功能
+- ⏰ **智能过滤**: 内置时间窗口过滤机制，避免处理过早的地震信息
+- 🔧 **服务管理**: 专为Windows服务环境优化，可通过NSSM管理
+- 🎚️ **远程控制**: 内置HTTP控制服务器，支持远程暂停/恢复/测试等操作
+- 📊 **状态监控**: 实时监控WebSocket连接状态和OBS录制状态
+- 🧹 **日志管理**: 自动轮转和清理日志文件
 
 ## 系统要求
 
-- Windows 10（目前仅在Windows 10上测试过）
+- Windows操作系统
 - Python 3.7+
-- OBS Studio（需要预先安装并配置）
+- OBS Studio 
+- OBS WebSocket插件 
 
 ## 安装步骤
 
-1. 克隆或下载此仓库到本地
+### 1. 安装Python依赖
 
 ```bash
-git clone <仓库地址>
+pip install websocket-client winsound requests obs-websocket-py
 ```
 
-2. 安装必要的Python依赖：
+### 2. 配置程序
 
-```bash
-pip install websocket-client websockets winsound pystray pillow win10toast obs-websocket-py requests
-```
-
-3. 根据您的环境修改代码中的配置项（特别是OBS路径和警报音文件路径）
-
-打开 `obvious_rec.py` 文件，找到以下配置项并进行修改：
+编辑Python源代码中的以下配置项：
 
 ```python
-# 默认配置 - 用户需要根据自己的环境修改这些配置
-DEFAULT_CONFIG = AppConfig(
-    obs_path=r"请填写您的OBS路径，例如：C:\Program Files\obs-studio\bin\64bit\obs64.exe",
-    obs_dir=r"请填写您的OBS目录，例如：C:\Program Files\obs-studio\bin\64bit",
-    record_path=os.path.expanduser(r"~\Videos"),  # 默认录制到用户视频目录
-    record_duration=360,  # 录制时长(秒)
-    cooldown=360,  # 冷却时间(秒)
-    alert_wav=r"请填写您的警报音文件路径，例如：alarm.wav",
-    toast_app_name="地震速报监听",
-    trigger_jma_intensity="5弱",  # JMA触发阈值
-    trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)
-    ws_jma="wss://ws-api.wolfx.jp/jma_eew",  # JMA WebSocket地址
-    ws_cea="wss://ws.fanstudio.tech/cea",  # CEA WebSocket地址
-    control_port=8787,  # HTTP控制端口
-    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # 日志目录
-)
+# OBS WebSocket配置
+obs_password = "你的OBS WebSocket服务器密码"  # 修改为你的OBS密码
+obs_scene_name = "你的OBS场景"                # 修改为你的OBS场景名称
+
+# 服务配置
+service_name = "你为此程序注册的服务名"       # 修改为你的Windows服务名称
+
+# 文件路径配置
+alert_wav = r"你的文件路径"                  # 修改为警报音文件路径
 ```
 
-4. 运行程序：
+### 3. 使用NSSM注册服务
 
 ```bash
-python obvious_rec.py  
+nssm install "你的服务名" "python.exe" "你的脚本路径.py"
+nssm set "你的服务名" AppDirectory "你的脚本所在目录"
 ```
-其次，为了更稳定运行，我们建议使用[NSSM](https://nssm.cc/download)将程序加载为Windows服务来运行
 
+### 4. 配置批处理文件
+
+编辑批处理文件中的服务名和日志路径：
+
+```bash
+nssm start 【此处填写你注册的NSSM服务名】
+notepad "【此处填写你的日志路径】"
+```
 
 ## 配置说明
 
-在运行程序前，您需要修改代码中的以下配置项：
+### 地震触发阈值
 
-- `obs_path`: OBS可执行文件的完整路径
-- `obs_dir`: OBS所在的目录
-- `alert_wav`: 警报音效文件的完整路径
-- `record_path`: 录制视频的保存路径
-- `trigger_jma_intensity`: JMA触发阈值（如"5弱"）
-- `trigger_cea_intensity`: CEA触发阈值（如7.0）
+```bash
+trigger_jma_intensity = "5弱"    # JMA触发阈值(震度)
+trigger_cea_intensity = 7.0      # CEA触发阈值(烈度)
+trigger_cwa_intensity = "5弱"    # CWA触发阈值(震度)
+```
+
+### 时间窗口设置
+
+```bash
+time_window_minutes = 10  # 忽略过早地震的时间窗口(分钟)
+```
+
+### 录制设置
+
+```python
+obs_record_duration = 600  # 录制持续时间(秒)，默认10分钟
+```
 
 ## 使用方法
 
-1. 运行程序后，它会最小化到系统托盘
-2. 右键点击托盘图标可以：
-   - 暂停/恢复监听
-   - 打开日志文件
-   - 清理日志文件
-   - 退出程序
-3. 程序也可以通过HTTP API进行控制：
+### 服务管理
+
+使用配套的批处理文件或以下命令管理服务：
 
 ```bash
-# 暂停监听
-curl "http://127.0.0.1:8787/command?cmd=pause"
+# 启动服务
+nssm start 服务名
 
-# 恢复监听
-curl "http://127.0.0.1:8787/command?cmd=resume"
+# 停止服务
+nssm stop 服务名
 
-# 触发测试警报
-curl "http://127.0.0.1:8787/command?cmd=test"
+# 重启服务
+nssm restart 服务名
 
-# 获取当前状态
-curl "http://127.0.0.1:8787/command?cmd=status"
+# 查看状态
+nssm status 服务名
+```
 
-# 清理日志
-curl "http://127.0.0.1:8787/command?cmd=cleanuplogs"
+### HTTP控制接口
+
+程序启动后，可以通过HTTP接口进行控制：
+
+```tex
+http://127.0.0.1:8787/command?cmd=命令
+```
+
+可用命令：
+
+- `pause` - 暂停监听
+- `resume` - 恢复监听
+- `test` - 触发测试警报
+- `status` - 获取当前状态
+- `cleanuplogs` - 清理旧日志
+- `wsstatus` - 查看WebSocket连接状态
+- `obsstatus` - 查看OBS状态
+- `obsstart` - 手动启动OBS录制
+- `obsstop` - 手动停止OBS录制
+- `timewindow` - 获取或设置时间窗口
+
+## 文件结构
+
+```tex
+quake_monitor/
+├── quake_monitor.py      # 主程序文件
+├── service_manager.bat   # 服务管理批处理
+├── logs/                 # 日志目录
+│   └── quake_monitor.log # 主日志文件
+└── README.md            # 说明文档
 ```
 
 ## 注意事项
 
-- 此程序目前仅在Windows 10上测试过，不保证在其他操作系统上的兼容性
-- 需要预先安装并配置好OBS Studio
-- 程序使用WebSocket连接接收预警信息，需要稳定的网络连接
-- 请根据您所在地区的地震风险合理设置触发阈值
+1. 确保OBS WebSocket插件已正确安装和配置
+2. 程序需要网络连接以访问地震预警服务
+3. 警报音文件需要是有效的WAV格式
+4. 服务运行时请勿直接关闭控制台窗口
+5. 录制功能需要OBS Studio正在运行
 
 ## 故障排除
 
-如果遇到问题，请检查：
+1. **服务无法启动**: 检查Python路径和脚本路径是否正确
+2. **无法连接OBS**: 检查OBS WebSocket插件是否启用，密码是否正确
+3. **无地震警报**: 检查网络连接和预警源配置
+4. **录制不启动**: 检查OBS场景名称是否正确
 
-1. OBS路径和警报音文件路径是否正确
-2. 网络连接是否正常
-3. 查看日志文件（位于程序目录下的logs文件夹中）
+------
 
-常见问题：
-
-1. **无法启动OBS录制**：请确认OBS路径配置正确，且OBS已正确安装
-2. **无法播放警报音**：请确认警报音文件路径正确，且文件格式为WAV
-3. **无法连接到预警服务器**：请检查网络连接，特别是防火墙设置
-
-## 免责声明
-
-此程序仅作为技术演示和个人使用，不保证预警信息的准确性和及时性。对于因使用此程序而导致的任何直接或间接损失，作者不承担任何责任。请勿将此程序用于关键安全应用。
+**重要**: 此程序仅作为技术参考，地震预警信息请以官方发布为准。
