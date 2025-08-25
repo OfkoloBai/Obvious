@@ -36,7 +36,7 @@ class AlertSource(Enum):
     """预警来源枚举"""
     JMA = auto()  # 日本气象厅
     CEA = auto()  # 中国地震预警网
-    CWA = auto()  # 台湾气象局
+    CWA = auto()  # 台湾气象署
     TEST = auto()  # 测试来源
 
 class FilteredStderr(io.TextIOWrapper):
@@ -79,7 +79,7 @@ class AppConfig:
     cooldown: int
     trigger_jma_intensity: str
     trigger_cea_intensity: float
-    trigger_cwa_intensity: int  # 添加CWA触发阈值
+    trigger_cwa_intensity: str  # 修改为字符串类型
     
     # 警报和通知配置
     alert_wav: str
@@ -113,10 +113,10 @@ class AppConfig:
     obs_port: int = 4455                 # OBS WebSocket端口
     obs_password: str = "你的OBS WebSocket服务器密码"  # OBS WebSocket密码<---在此处修改为你自己的OBWebSocket服务器密码
     obs_record_duration: int = 600       # 录制持续时间(秒)，默认10分钟，单位秒<---|录制时间
-    obs_scene_name: str = "你的OBS场景名称"     # OBS场景名称<---此处改为你自己的OBS场景名称
+    obs_scene_name: str = "你的OBS场景"     # OBS场景名称<---此处改为你自己的OBS场景名称
 
     # 服务重启配置
-    service_name: str = "你的NSSM服务名称"  # Windows服务名称<---如果你是使用的NSSM运行的此程序，则填写你注册的服务名称
+    service_name: str = "你为此程序注册的服务名"  # Windows服务名称<---如果你是使用的NSSM运行的此程序，则填写你注册的服务名称
     restart_delay: int = 5  # 重启服务前的延迟时间(秒)
 
     # 时间窗口配置
@@ -130,11 +130,11 @@ class AppConfig:
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
     cooldown=600,  # 冷却时间(秒)，建议等于或略小于录制时长
-    alert_wav=r"你的音频文件路径",   # <---此处修改为你的警报音文件路径
+    alert_wav=r"你的文件路径",   # <---此处修改为你的警报音文件路径
     toast_app_name="地震速报监听",
-    trigger_jma_intensity="4",  # JMA触发阈值<---|日本气象厅触发阈值(震度)
-    trigger_cea_intensity=6.5,  # CEA触发阈值(烈度)<---|中国地震台网触发阈值(烈度)
-    trigger_cwa_intensity=4,    # CWA触发阈值(震度)<---|台湾气象署触发阈值(震度)
+    trigger_jma_intensity="5弱",  # JMA触发阈值<---|日本气象厅触发阈值(震度)
+    trigger_cea_intensity=7.0,  # CEA触发阈值(烈度)<---|中国地震台网触发阈值(烈度)
+    trigger_cwa_intensity="5弱",  # CWA触发阈值(震度)<---|台湾气象署触发阈值(震度)
     ws_jma="wss://ws-api.wolfx.jp/jma_eew",  # JMA WebSocket地址
     ws_cea="wss://ws.fanstudio.tech/cea",  # CEA WebSocket地址
     cwa_api_url="https://api.wolfx.jp/cwa_eew.json",  # CWA API地址
@@ -533,8 +533,8 @@ def validate_config(config: AppConfig) -> bool:
         errors.append(f"CEA阈值必须大于0: {config.trigger_cea_intensity}")
     
     # 检查CWA阈值有效性
-    if config.trigger_cwa_intensity < 0 or config.trigger_cwa_intensity > 9:
-        errors.append(f"CWA阈值必须在0-9之间: {config.trigger_cwa_intensity}")
+    if config.trigger_cwa_intensity not in JMA_INTENSITY_MAP:
+        errors.append(f"CWA阈值设置无效: {config.trigger_cwa_intensity}")
     
     # 检查时间窗口有效性
     if config.time_window_minutes <= 0:
@@ -851,15 +851,15 @@ def cwa_monitor_loop():
                 if data.get("isCancel", False):
                     continue
                     
-                # 获取最大震度
-                max_intensity = data.get("MaxIntensity", "")
-                try:
-                    max_intensity_value = JMA_INTENSITY_MAP.get(str(max_intensity), -1)
-                except (ValueError, TypeError):
-                    max_intensity_value = -1
+                # 获取最大震度（字符串）
+                max_intensity = str(data.get("MaxIntensity", "")).strip()
+                
+                # 使用映射表进行比较
+                current_intensity_value = JMA_INTENSITY_MAP.get(max_intensity, -1)
+                threshold_value = JMA_INTENSITY_MAP.get(state.config.trigger_cwa_intensity, -1)
                 
                 # 检查是否达到阈值
-                if max_intensity_value >= state.config.trigger_cwa_intensity and max_intensity_value != -1:
+                if current_intensity_value >= threshold_value and current_intensity_value != -1:
                     # 获取其他信息
                     place = data.get("HypoCenter", "")
                     mag = data.get("Magunitude", "")
