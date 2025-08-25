@@ -1,6 +1,6 @@
 """
 地震速报监听程序 - NSSM服务版本
-监听日本气象厅(JMA)和中国地震预警网(CEA)的地震预警信息
+监听日本气象厅(JMA)、中国地震预警网(CEA)和台湾气象署(CWA)的地震预警信息
 当检测到达到设定阈值的地震时，自动触发警报和OBS录制
 注意：此版本专为作为Windows服务运行而优化
 """
@@ -27,6 +27,7 @@ from pathlib import Path
 # 第三方库
 import websocket
 import winsound
+import requests  # 添加requests库用于HTTP请求
 
 # =========================
 # 枚举和常量定义
@@ -35,6 +36,7 @@ class AlertSource(Enum):
     """预警来源枚举"""
     JMA = auto()  # 日本气象厅
     CEA = auto()  # 中国地震预警网
+    CWA = auto()  # 台湾气象局
     TEST = auto()  # 测试来源
 
 class FilteredStderr(io.TextIOWrapper):
@@ -77,6 +79,7 @@ class AppConfig:
     cooldown: int
     trigger_jma_intensity: str
     trigger_cea_intensity: float
+    trigger_cwa_intensity: int  # 添加CWA触发阈值
     
     # 警报和通知配置
     alert_wav: str
@@ -85,6 +88,7 @@ class AppConfig:
     # WebSocket和网络配置
     ws_jma: str
     ws_cea: str
+    cwa_api_url: str  # 添加CWA API地址
     control_port: int
     
     # 日志和文件配置
@@ -102,20 +106,21 @@ class AppConfig:
     # 其他配置
     alarm_repeat_count: int = 3  # 警报音重复次数
     log_cleanup_interval: int = 86400  # 日志清理间隔(秒)，默认每天一次
+    cwa_poll_interval: int = 3  # CWA API请求间隔(秒)
     
     # OBS WebSocket配置
     obs_host: str = "localhost"          # OBS WebSocket服务器地址
     obs_port: int = 4455                 # OBS WebSocket端口
-    obs_password: str = "【此处填写你的OBS WebSocket服务器密码】"  # OBS WebSocket密码
-    obs_record_duration: int = 600       # 录制持续时间(秒)，默认10分钟，单位秒
-    obs_scene_name: str = 【此处填写你的OBS录制场景】"     # OBS场景名称
+    obs_password: str = "你的OBS WebSocket服务器密码"  # OBS WebSocket密码<---在此处修改为你自己的OBWebSocket服务器密码
+    obs_record_duration: int = 600       # 录制持续时间(秒)，默认10分钟，单位秒<---|录制时间
+    obs_scene_name: str = "你的OBS场景名称"     # OBS场景名称<---此处改为你自己的OBS场景名称
 
     # 服务重启配置
-    service_name: str = "【如果你是使用服务运行的此程序，此处填写你注册的服务名】"  # Windows服务名称
+    service_name: str = "你的NSSM服务名称"  # Windows服务名称<---如果你是使用的NSSM运行的此程序，则填写你注册的服务名称
     restart_delay: int = 5  # 重启服务前的延迟时间(秒)
 
     # 时间窗口配置
-    time_window_minutes: int = 10  # 时间窗口（分钟），默认10分钟
+    time_window_minutes: int = 10  # 时间窗口（分钟），默认10分钟<---|忽略过早地震的时间窗口
 
     def to_dict(self) -> Dict[str, Any]:
         """将配置转换为字典"""
@@ -125,15 +130,17 @@ class AppConfig:
 # 默认配置 - 用户需要根据自己的环境修改这些配置
 DEFAULT_CONFIG = AppConfig(
     cooldown=600,  # 冷却时间(秒)，建议等于或略小于录制时长
-    alert_wav=r"【在此处填写你的音频文件路径】",
+    alert_wav=r"你的音频文件路径",   # <---此处修改为你的警报音文件路径
     toast_app_name="地震速报监听",
-    trigger_jma_intensity="3",  # JMA触发阈值
-    trigger_cea_intensity=5.5,  # CEA触发阈值(烈度)
+    trigger_jma_intensity="4",  # JMA触发阈值<---|日本气象厅触发阈值(震度)
+    trigger_cea_intensity=6.5,  # CEA触发阈值(烈度)<---|中国地震台网触发阈值(烈度)
+    trigger_cwa_intensity=4,    # CWA触发阈值(震度)<---|台湾气象署触发阈值(震度)
     ws_jma="wss://ws-api.wolfx.jp/jma_eew",  # JMA WebSocket地址
     ws_cea="wss://ws.fanstudio.tech/cea",  # CEA WebSocket地址
+    cwa_api_url="https://api.wolfx.jp/cwa_eew.json",  # CWA API地址
     control_port=8787,  # HTTP控制端口
     log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"),  # 日志目录
-    time_window_minutes= 10 # 时间窗口（分钟）,在<--此处修改为你想要的值,但建议大于录制时长
+    time_window_minutes= 10 # 时间窗口（分钟）,在此处修改为你想要的值,但建议大于录制时长
 )
 
 
@@ -429,6 +436,7 @@ class GlobalState:
         self.ws_connections = {}  # 跟踪WebSocket连接状态
         self.is_service = False  # 标记是否作为服务运行
         self.obs_controller: Optional[OBSController] = None  # OBS控制器
+        self.last_cwa_request_time = 0.0  # 上次CWA请求时间
         
     def is_in_cooldown(self) -> bool:
         """检查是否处于冷却时间内"""
@@ -523,6 +531,10 @@ def validate_config(config: AppConfig) -> bool:
     
     if config.trigger_cea_intensity <= 0:
         errors.append(f"CEA阈值必须大于0: {config.trigger_cea_intensity}")
+    
+    # 检查CWA阈值有效性
+    if config.trigger_cwa_intensity < 0 or config.trigger_cwa_intensity > 9:
+        errors.append(f"CWA阈值必须在0-9之间: {config.trigger_cwa_intensity}")
     
     # 检查时间窗口有效性
     if config.time_window_minutes <= 0:
@@ -668,6 +680,7 @@ def unified_trigger(source: AlertSource, lines: List[str], event_id: Optional[st
     source_name = {
         AlertSource.JMA: "日本气象厅 (JMA)",
         AlertSource.CEA: "中国地震预警网 (CEA)",
+        AlertSource.CWA: "台湾气象局 (CWA)",
         AlertSource.TEST: "人工测试"
     }[source]
     
@@ -805,6 +818,85 @@ def on_message_cea(ws, message):
         state.logger.error(f"CEA JSON解析错误: {e}")
     except Exception as e:
         state.logger.error(f"CEA 解析错误: {e}")
+
+
+def cwa_monitor_loop():
+    """CWA API监控循环"""
+    while state.program_state != ProgramState.STOPPING:
+        try:
+            # 检查是否启用监控
+            if not state.monitoring_enabled:
+                time.sleep(state.config.cwa_poll_interval)
+                continue
+                
+            # 检查网络连接
+            if not check_network_connection():
+                time.sleep(state.config.cwa_poll_interval)
+                continue
+                
+            # 检查是否达到请求间隔
+            current_time = time.time()
+            if current_time - state.last_cwa_request_time < state.config.cwa_poll_interval:
+                time.sleep(0.1)
+                continue
+                
+            # 发送HTTP GET请求
+            response = requests.get(state.config.cwa_api_url, timeout=10)
+            state.last_cwa_request_time = current_time
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 忽略取消报文
+                if data.get("isCancel", False):
+                    continue
+                    
+                # 获取最大震度
+                max_intensity = data.get("MaxIntensity", "")
+                try:
+                    max_intensity_value = JMA_INTENSITY_MAP.get(str(max_intensity), -1)
+                except (ValueError, TypeError):
+                    max_intensity_value = -1
+                
+                # 检查是否达到阈值
+                if max_intensity_value >= state.config.trigger_cwa_intensity and max_intensity_value != -1:
+                    # 获取其他信息
+                    place = data.get("HypoCenter", "")
+                    mag = data.get("Magunitude", "")
+                    depth = data.get("Depth", "")
+                    origin_time = data.get("OriginTime", "")
+                    report_time = data.get("ReportTime", "")
+                    eid = str(data.get("ID", ""))
+                    report_num = data.get("ReportNum", "")
+                    
+                    # 检查报告时间是否在配置的时间窗口内 (CWA是UTC+8)
+                    if not is_within_time_window(report_time, 8):
+                        continue
+                    
+                    lines = [
+                        f"地点: {place}",
+                        f"最大震度: {max_intensity}",
+                        f"震级: M{mag}   深度: {depth} km",
+                        f"发震时间: {origin_time}",
+                        f"报告时间: {report_time}",
+                        f"报告编号: {report_num}",
+                        f"事件ID: {eid}"
+                    ]
+                    
+                    unified_trigger(AlertSource.CWA, lines, eid)
+                    
+        except requests.exceptions.RequestException:
+            # 网络请求异常，静默处理
+            pass
+        except json.JSONDecodeError:
+            # JSON解析异常，静默处理
+            pass
+        except Exception:
+            # 其他异常，静默处理
+            pass
+            
+        # 短暂休眠
+        time.sleep(0.1)
 
 
 def ws_loop(name: str, url: str, handler: Callable):
@@ -1037,13 +1129,14 @@ def main():
         f"程序已启动 "
         f"(JMA阈值: {state.config.trigger_jma_intensity}, "
         f"CEA阈值: {state.config.trigger_cea_intensity}, "
+        f"CWA阈值: {state.config.trigger_cwa_intensity}, "
         f"时间窗口: {state.config.time_window_minutes}分钟, "
         f"日志保留天数: {state.config.log_retention_days})"
     )
     
     state.logger.info(f"运行模式: {'服务模式' if state.is_service else '控制台模式'}")
 
-    # 启动两个 WS 线程
+    # 启动三个监控线程
     jma_thread = threading.Thread(
         target=ws_loop, 
         args=("JMA", state.config.ws_jma, on_message_jma), 
@@ -1056,8 +1149,14 @@ def main():
         daemon=True
     )
     
+    cwa_thread = threading.Thread(
+        target=cwa_monitor_loop, 
+        daemon=True
+    )
+    
     jma_thread.start()
     cea_thread.start()
+    cwa_thread.start()
 
     # 主线程循环
     try:
